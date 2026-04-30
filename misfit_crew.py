@@ -49,16 +49,21 @@ load_dotenv()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_EMBED_URL = "https://openrouter.ai/api/v1/embeddings"
-OLLAMA_GEN_URL = "http://localhost:11434/api/generate"
+ANALYSIS_PROVIDER = os.getenv("ANALYSIS_PROVIDER", "DeepSeek")
+DEEPSEEK_CHAT_URL = os.getenv("DEEPSEEK_CHAT_URL", "https://api.deepseek.com/v1/chat/completions")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-reasoner")
+EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "OpenRouter")
+OPENROUTER_EMBED_URL = os.getenv("OPENROUTER_EMBED_URL", "https://openrouter.ai/api/v1/embeddings")
+CRITIC_PROVIDER = os.getenv("CRITIC_PROVIDER", "Ollama")
+OLLAMA_GEN_URL = os.getenv("OLLAMA_GEN_URL", "http://localhost:11434/api/generate")
 
 SOURCE_COLLECTION = "meta_reflections"
 DEST_COLLECTION = "misfit_reports"
 LEDGER_FILE = "misfit_ledger.json"
 FAILURES_FILE = "misfit_failures.json"
 
-CRITIC_MODEL = "gemma4:latest"
-EMBED_MODEL = "google/gemini-embedding-001"
+CRITIC_MODEL = os.getenv("CRITIC_MODEL", "gemma4:latest")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "google/gemini-embedding-001")
 EMBED_DIM = 3072
 
 DEFAULT_MAX_ATTEMPTS = 3
@@ -268,13 +273,13 @@ async def deepseek_analyze(payload: dict, api_key: str) -> tuple[str, str]:
         try:
             async with httpx.AsyncClient(timeout=180.0) as ds:
                 resp = await ds.post(
-                    "https://api.deepseek.com/v1/chat/completions",
+                    DEEPSEEK_CHAT_URL,
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "deepseek-reasoner",
+                        "model": DEEPSEEK_MODEL,
                         "messages": [{"role": "user", "content": prompt}],
                     },
                 )
@@ -309,7 +314,7 @@ async def gemma_critique(report: str) -> str:
 # --------------------------------------------------------- publish + ledger --
 
 async def publish(point_id: str, source: str, reasoning: str, report: str, verdict: str) -> bool:
-    print(f"📡 Vectorizing with {EMBED_MODEL} via OpenRouter...")
+    print(f"📡 Vectorizing with {EMBED_MODEL} via {EMBED_PROVIDER}...")
     claims_vector = await openrouter_embed(report)
     summary_vector = await openrouter_embed(verdict)
     if not claims_vector or not summary_vector:
@@ -396,9 +401,15 @@ async def run_conductor(args):
     if not DEEPSEEK_API_KEY:
         print("[fatal] DEEPSEEK_API_KEY not set in env or .env file")
         return 1
+    if not OPENROUTER_API_KEY:
+        print("[fatal] OPENROUTER_API_KEY not set in env or .env file")
+        return 1
 
     print(f"🚀 Misfit Crew: Starting Full-Cycle Archaeology Loop...")
     print(f"[config] qdrant={QDRANT_URL} max_attempts={args.max_attempts} sleep={args.sleep}s")
+    print(f"[config] analysis_provider={ANALYSIS_PROVIDER} model={DEEPSEEK_MODEL}")
+    print(f"[config] embed_provider={EMBED_PROVIDER} model={EMBED_MODEL}")
+    print(f"[config] critic_provider={CRITIC_PROVIDER} model={CRITIC_MODEL}")
 
     ensure_collections()
 
