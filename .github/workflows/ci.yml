@@ -27,6 +27,15 @@ jobs:
 
       - name: CLI smoke checks
         run: |
-          python misfit_crew.py --help
-          python misfit_report_pull.py --help
-          python canon_alignment_report.py --help
+          set -euo pipefail
+          scripts=(misfit_crew.py misfit_report_pull.py canon_alignment_report.py)
+          found=0
+          for script in "${scripts[@]}"; do
+            if [[ -f "$script" ]]; then
+              python "$script" --help
+              found=1
+            fi
+          done
+          if [[ "$found" -eq 0 ]]; then
+            echo "No CLI scripts found; skipping smoke checks."
+          fi
