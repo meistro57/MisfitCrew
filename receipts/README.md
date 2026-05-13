@@ -31,6 +31,7 @@ Output format:
 cd ~/MisfitCrew/receipts
 go mod tidy
 go build -o receipts ./cmd
+go test ./...
 ```
 
 ---
