@@ -81,7 +81,7 @@ type config struct {
 }
 
 func loadConfig() config {
-	_ = godotenv.Load(".env")
+	_ = godotenv.Load(filepath.Join("..", ".env"), ".env")
 
 	cfg := config{
 		qdrantHost:            envOr("QDRANT_HOST", "localhost"),
