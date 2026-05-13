@@ -1,4 +1,5 @@
 # MisfitCrew
+<img width="328" height="305" alt="image" src="https://github.com/user-attachments/assets/330c2c3a-5b70-4be2-a995-1568e49ed2ba" />
 
 Script-first Python workspace for mining, critiquing, and reporting over Qdrant collections.
 
