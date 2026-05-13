@@ -49,11 +49,14 @@ load_dotenv()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+ANALYSIS_API_KEY = os.getenv("ANALYSIS_API_KEY")
 ANALYSIS_PROVIDER = os.getenv("ANALYSIS_PROVIDER", "DeepSeek")
 DEEPSEEK_CHAT_URL = os.getenv("DEEPSEEK_CHAT_URL", "https://api.deepseek.com/v1/chat/completions")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-reasoner")
 EMBED_PROVIDER = os.getenv("EMBED_PROVIDER", "OpenRouter")
 OPENROUTER_EMBED_URL = os.getenv("OPENROUTER_EMBED_URL", "https://openrouter.ai/api/v1/embeddings")
+OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL")
+OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "MisfitCrew")
 CRITIC_PROVIDER = os.getenv("CRITIC_PROVIDER", "Ollama")
 OLLAMA_GEN_URL = os.getenv("OLLAMA_GEN_URL", "http://localhost:11434/api/generate")
 
@@ -63,6 +66,7 @@ LEDGER_FILE = "misfit_ledger.json"
 FAILURES_FILE = "misfit_failures.json"
 
 CRITIC_MODEL = os.getenv("CRITIC_MODEL", "gemma4:latest")
+CRITIC_CHAT_URL = os.getenv("CRITIC_CHAT_URL", "https://openrouter.ai/api/v1/chat/completions")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "google/gemini-embedding-001")
 EMBED_DIM = 3072
 
@@ -238,14 +242,38 @@ REPORT TO CRITIQUE:
 """
 
 
+def is_openrouter_url(url: str) -> bool:
+    return "openrouter.ai" in (url or "").lower()
+
+
+def resolve_analysis_api_key() -> Optional[str]:
+    if ANALYSIS_API_KEY:
+        return ANALYSIS_API_KEY
+    if is_openrouter_url(DEEPSEEK_CHAT_URL):
+        return OPENROUTER_API_KEY or DEEPSEEK_API_KEY
+    return DEEPSEEK_API_KEY
+
+
+def build_auth_headers(api_key: str, url: str) -> dict[str, str]:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if is_openrouter_url(url):
+        site_url = OPENROUTER_SITE_URL or os.getenv("OR_SITE_URL")
+        app_name = OPENROUTER_APP_NAME or os.getenv("OR_APP_NAME")
+        if site_url:
+            headers["HTTP-Referer"] = site_url
+        if app_name:
+            headers["X-Title"] = app_name
+    return headers
+
+
 async def openrouter_embed(text: str) -> Optional[list[float]]:
     async with httpx.AsyncClient(timeout=60.0) as http:
         resp = await http.post(
             OPENROUTER_EMBED_URL,
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-            },
+            headers=build_auth_headers(OPENROUTER_API_KEY, OPENROUTER_EMBED_URL),
             json={"model": EMBED_MODEL, "input": text},
         )
         resp.raise_for_status()
@@ -274,10 +302,7 @@ async def deepseek_analyze(payload: dict, api_key: str) -> tuple[str, str]:
             async with httpx.AsyncClient(timeout=180.0) as ds:
                 resp = await ds.post(
                     DEEPSEEK_CHAT_URL,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=build_auth_headers(api_key, DEEPSEEK_CHAT_URL),
                     json={
                         "model": DEEPSEEK_MODEL,
                         "messages": [{"role": "user", "content": prompt}],
@@ -302,13 +327,27 @@ async def deepseek_analyze(payload: dict, api_key: str) -> tuple[str, str]:
 
 async def gemma_critique(report: str) -> str:
     prompt = f"{HGOS_CRITIC_PROMPT}\n{report}"
-    async with httpx.AsyncClient(timeout=120.0) as http:
-        resp = await http.post(
-            OLLAMA_GEN_URL,
-            json={"model": CRITIC_MODEL, "prompt": prompt, "stream": False},
-        )
-        resp.raise_for_status()
-        return resp.json().get("response", "⚠️ Critic offline.")
+    if CRITIC_PROVIDER.lower() == "openrouter":
+        async with httpx.AsyncClient(timeout=120.0) as http:
+            resp = await http.post(
+                CRITIC_CHAT_URL,
+                headers=build_auth_headers(OPENROUTER_API_KEY, CRITIC_CHAT_URL),
+                json={
+                    "model": CRITIC_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+    else:
+        # Ollama
+        async with httpx.AsyncClient(timeout=120.0) as http:
+            resp = await http.post(
+                OLLAMA_GEN_URL,
+                json={"model": CRITIC_MODEL, "prompt": prompt, "stream": False},
+            )
+            resp.raise_for_status()
+            return resp.json().get("response", "⚠️ Critic offline.")
 
 
 # --------------------------------------------------------- publish + ledger --
@@ -398,8 +437,9 @@ async def process_one(target, failures: dict, max_attempts: int, api_key: str) -
 async def run_conductor(args):
     global STOP
 
-    if not DEEPSEEK_API_KEY:
-        print("[fatal] DEEPSEEK_API_KEY not set in env or .env file")
+    analysis_api_key = resolve_analysis_api_key()
+    if not analysis_api_key:
+        print("[fatal] analysis API key missing (set ANALYSIS_API_KEY, DEEPSEEK_API_KEY, or OPENROUTER_API_KEY)")
         return 1
     if not OPENROUTER_API_KEY:
         print("[fatal] OPENROUTER_API_KEY not set in env or .env file")
@@ -441,7 +481,7 @@ async def run_conductor(args):
         if STOP:
             break
 
-        result = await process_one(target, failures, args.max_attempts, DEEPSEEK_API_KEY)
+        result = await process_one(target, failures, args.max_attempts, analysis_api_key)
         processed += 1
         if result == "ok":
             successes += 1

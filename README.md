@@ -34,6 +34,7 @@ Create `.env` in repo root as needed:
 QDRANT_URL=http://localhost:6333
 DEEPSEEK_API_KEY=...
 OPENROUTER_API_KEY=...
+ANALYSIS_API_KEY=...
 
 # Provider/model controls for misfit_crew.py
 ANALYSIS_PROVIDER=DeepSeek
@@ -42,12 +43,16 @@ DEEPSEEK_MODEL=deepseek-reasoner
 
 EMBED_PROVIDER=OpenRouter
 OPENROUTER_EMBED_URL=https://openrouter.ai/api/v1/embeddings
+OPENROUTER_SITE_URL=
+OPENROUTER_APP_NAME=MisfitCrew
 EMBED_MODEL=google/gemini-embedding-001
 
 CRITIC_PROVIDER=Ollama
 OLLAMA_GEN_URL=http://localhost:11434/api/generate
 CRITIC_MODEL=gemma4:latest
 ```
+
+If `DEEPSEEK_CHAT_URL` points to OpenRouter, `misfit_crew.py` now auto-uses `OPENROUTER_API_KEY` for analysis unless `ANALYSIS_API_KEY` is explicitly set.
 
 ## Usage
 
