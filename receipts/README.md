@@ -2,26 +2,26 @@
 
 **The "Look at this!!" engine.**
 
-Takes a concept and generates a plain-English multi-tradition synthesis document showing that people from completely different cultures, centuries, and backgrounds all independently arrived at the same idea — with receipts.
+Takes a concept and generates a plain-English multi-tradition synthesis document showing that people from different cultures, eras, and backgrounds independently arrived at the same idea — with receipts.
 
-Part of the MisfitCrew pipeline. Sits downstream of `misfit_crew.py` and `meta_reflections`.
+Part of the MisfitCrew pipeline, downstream of `meta_reflections` and `misfit_reports`.
 
 ---
 
 ## What it does
 
 1. Auto-detects embedding model from `meta_reflections` vector size (if available), then embeds your concept query via OpenRouter
-2. Searches `meta_reflections` for the best matching chunks across distinct source traditions
+2. Searches `meta_reflections` for top matching chunks across distinct source traditions
 3. Searches `misfit_reports` for Hardware Glitch receipts on the same material
-4. Sends everything to DeepSeek R1 to write a plain-English synthesis doc
-5. Outputs Markdown to `./output/<concept>_<timestamp>.md`
+4. Sends everything to DeepSeek to write a synthesis doc
+5. Writes Markdown to `./output/<concept>_<timestamp>.md`
 
 Output format:
-- **The Big Idea** — plain English, 2-3 sentences
-- **The Receipts** — one paragraph per source tradition with the specific claim
-- **Why This Is Wild** — why the cross-tradition convergence is remarkable
-- **The Weird Part** — the Hardware Glitch, the place it contradicts itself
-- **What It Means For You** — practical takeaway
+- **The Core Claim**
+- **The Receipts**
+- **Why The Convergence Matters**
+- **The Hardware Glitch**
+- **The Operative Question**
 
 ---
 
@@ -30,8 +30,8 @@ Output format:
 ```bash
 cd ~/MisfitCrew/receipts
 go mod tidy
-go build -o receipts ./cmd
-go test ./...
+./rebuild.sh
+./receipts --help
 ```
 
 ---
@@ -39,13 +39,13 @@ go test ./...
 ## Usage
 
 ```bash
-# See what concepts are available
+# Show top corpus concepts
 ./receipts --list-concepts
 
 # Generate a receipts doc
 ./receipts --concept "belief creates reality"
 
-# More sources, fast mode (no R1 chain-of-thought)
+# More source traditions, fast model
 ./receipts --concept "consciousness survives death" --sources 8 --model deepseek-chat
 
 # Alias for sources count
@@ -53,23 +53,35 @@ go test ./...
 
 # Custom output dir
 ./receipts --concept "non-linear time" --out ~/MisfitCrew/receipts/output
+
+# Version
+./receipts --version
 ```
 
 ---
 
 ## Environment (.env or shell)
 
+`receipts` loads env in this order:
+1. `../.env` (repo root)
+2. `./.env` (receipts directory)
+3. existing shell environment
+
 ```env
-QDRANT_URL=http://localhost:6333
+QDRANT_HOST=localhost
 OPENROUTER_API_KEY=sk-or-...
-DEEPSEEK_API_KEY=sk-...          # only needed if pointing directly at DeepSeek
-DEEPSEEK_CHAT_URL=https://api.deepseek.com/v1/chat/completions
-DEEPSEEK_MODEL=deepseek-reasoner
-EMBED_MODEL=google/gemini-embedding-001 # fallback when collection model can't be inferred
+DEEPSEEK_API_KEY=sk-...          # only needed when DEEPSEEK_CHAT_URL points directly at DeepSeek
+DEEPSEEK_CHAT_URL=https://openrouter.ai/api/v1/chat/completions
+DEEPSEEK_MODEL=deepseek-reasoner # auto-maps on OpenRouter to deepseek/deepseek-r1
+EMBED_MODEL=google/gemini-embedding-001 # fallback when collection model cannot be inferred
 SOURCE_TRADITIONS_COUNT=6              # default when --sources is not passed
 REFLECTIONS_COLLECTION=meta_reflections
 REPORTS_COLLECTION=misfit_reports
 ```
+
+Notes:
+- Qdrant connection is gRPC at `QDRANT_HOST:6334`.
+- `OPENROUTER_API_KEY` is required for embeddings and synthesis when `DEEPSEEK_CHAT_URL` is an OpenRouter endpoint.
 
 ---
 
@@ -82,17 +94,18 @@ meta_reflections
     ↓ misfit_crew.py
 misfit_reports
     ↓
-receipts  ← YOU ARE HERE
+receipts
     ↓
-output/<concept>.md  →  QMU forum / ROOT ACCESS / Discord / blog
+output/<concept>_<timestamp>.md
 ```
 
 ---
 
-## Notes
+## Operational notes
 
-- `--list-concepts` scrolls the entire `meta_reflections` collection and ranks concepts by cross-source spread. Takes ~30 seconds on 3k reflections.
-- R1 synthesis takes 3-5 minutes. Use `--model deepseek-chat` for fast drafts.
-- Embedding model is auto-selected from the reflections collection `claims_vec` size when recognized (3072 → `google/gemini-embedding-001`, 1536 → `openai/text-embedding-3-small`).
-- `misfit_reports` is optional — if empty, receipts still runs, just without the Hardware Glitch section populated from the critic layer.
-- Source names are mapped to human-readable labels in `friendlySourceName()` — add new sources there as you ingest them.
+- `--list-concepts` scrolls all of `meta_reflections` and ranks concepts by cross-source spread.
+- `deepseek-reasoner` asks for confirmation before long synthesis runs.
+- On OpenRouter URLs, `deepseek-reasoner` and `deepseek-chat` map to `deepseek/deepseek-r1` and `deepseek/deepseek-chat`.
+- Embedding model is auto-selected from `claims_vec` size when recognized (3072 → `google/gemini-embedding-001`, 1536 → `openai/text-embedding-3-small`).
+- `misfit_reports` is optional; receipts still runs if no glitch matches are found.
+- Source name display mapping lives in `friendlySourceName()` in `receipts/cmd/main.go`.

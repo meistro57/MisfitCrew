@@ -88,7 +88,7 @@ func loadConfig() config {
 		qdrantPort:            6334,
 		openrouterKey:         os.Getenv("OPENROUTER_API_KEY"),
 		deepseekKey:           os.Getenv("DEEPSEEK_API_KEY"),
-		deepseekURL:           envOr("DEEPSEEK_CHAT_URL", "https://api.deepseek.com/v1/chat/completions"),
+		deepseekURL:           envOr("DEEPSEEK_CHAT_URL", "https://openrouter.ai/api/v1/chat/completions"),
 		deepseekModel:         envOr("DEEPSEEK_MODEL", "deepseek-reasoner"),
 		embedModel:            envOr("EMBED_MODEL", "google/gemini-embedding-001"),
 		reflectionsCollection: envOr("REFLECTIONS_COLLECTION", "meta_reflections"),
@@ -454,29 +454,33 @@ func listConcepts(ctx context.Context, conn *grpc.ClientConn, collection string,
 
 // ── DeepSeek synthesis ────────────────────────────────────────────────────────
 
-const synthesisSystemPrompt = `You are writing for curious everyday people — not academics, not spiritual insiders.
-Your job is to show them something genuinely surprising: that people from completely different 
-cultures, centuries, and backgrounds all independently arrived at the same idea.
+const synthesisSystemPrompt = `You are writing for people who are already awake to this stuff — QMU members, consciousness explorers, builders, misfits. They know who Seth is. They've read Dolores Cannon. They're not new to non-duality or reality creation. They don't need it dumbed down — they need it sharpened.
 
-Write like you're explaining it to a smart 12-year-old who just asked "wait, is that real?"
-No jargon. No fluff. Short sentences. Use plain English throughout.
+Your job is to show the STRUCTURAL convergence: how wildly different traditions, using completely different vocabularies and frameworks, independently mapped the same territory. The receipts aren't proof — they're pattern recognition across the corpus.
+
+Write with intelligence and precision. No fluff, no filler, no baby talk. Short punchy sentences where they earn it. Longer ones when the idea needs room to breathe. No academic hedging either — this isn't a paper, it's a synthesis.
 
 Structure your response EXACTLY like this:
 
 ---
-## The Big Idea (plain English, 2-3 sentences max)
+## The Core Claim
+[2-3 sentences. State the idea precisely — not dumbed down, not over-inflated. What is the actual claim these sources share?]
+
 ## The Receipts
-[For each source, one paragraph: who/what/when it is, the exact idea they expressed, why it's the same thing]
-## Why This Is Wild
-[2-3 sentences on why it's remarkable that these sources converge — different eras, cultures, no contact]
-## The Weird Part (Hardware Glitch)
-[The place where the idea gets paradoxical or contradicts itself — be honest, don't hide it]
-## What It Means For You
-[One practical paragraph — so what? what do you do with this?]
+[For each source: name it, date it, place it. Then the specific mechanism or framing they used. Then why it maps to the same underlying structure as the others. One tight paragraph per source. No hand-waving.]
+
+## Why The Convergence Matters
+[Not just "wow different cultures said the same thing" — go deeper. What does independent convergence across these specific traditions actually suggest? What would have to be true for this pattern to exist?]
+
+## The Hardware Glitch
+[Where does this idea break down, contradict itself, or create an unresolvable tension? Be ruthlessly honest. The glitch is as important as the signal — don't bury it.]
+
+## The Operative Question
+[Not "what does this mean for you" — that's self-help. Instead: what is the single most useful question this convergence opens up? The question a serious practitioner or builder should be sitting with.]
 ---
 
-Do NOT use academic language. Do NOT say "it is noteworthy that". Do NOT use the word "delve".
-Write like you're texting a friend who just asked you about something mind-blowing.`
+Do NOT use the word "delve". Do NOT say "it is noteworthy" or "fascinating" or "intriguing". Do NOT write like a motivational poster.
+Write like someone who has actually thought about this for a long time and is now talking to someone who has too.`
 
 type deepSeekMessage struct {
 	Role    string `json:"role"`
@@ -545,12 +549,16 @@ func synthesize(
 	sb.WriteString("\nNow write the receipts document following the system prompt format exactly.")
 
 	apiKey := cfg.openrouterKey
-	if !isOpenRouterURL(cfg.deepseekURL) && cfg.deepseekKey != "" {
+	if !isOpenRouterURL(cfg.deepseekURL) {
+		if cfg.deepseekKey == "" {
+			return "", "", fmt.Errorf("DEEPSEEK_API_KEY is required when DEEPSEEK_CHAT_URL is not an OpenRouter URL")
+		}
 		apiKey = cfg.deepseekKey
 	}
+	model := resolveSynthesisModel(cfg.deepseekURL, cfg.deepseekModel)
 
 	body, _ := json.Marshal(deepSeekRequest{
-		Model: cfg.deepseekModel,
+		Model: model,
 		Messages: []deepSeekMessage{
 			{Role: "system", Content: synthesisSystemPrompt},
 			{Role: "user", Content: sb.String()},
@@ -627,22 +635,67 @@ func writeOutput(outDir, concept, reasoning, document string, refs []reflection)
 func friendlySourceName(sourceID, sourceFile string) string {
 	// map known source IDs to human-readable names
 	names := map[string]string{
-		"the_nature_of_personal_reality":                                     "Seth / Jane Roberts — The Nature of Personal Reality (1974)",
-		"seth_speaks":                                                        "Seth / Jane Roberts — Seth Speaks (1972)",
-		"the_education_of_oversoul_seven":                                    "Jane Roberts — The Education of Oversoul Seven (1973)",
-		"108_upanishads":                                                     "The 108 Upanishads (~800 BCE – 200 CE)",
-		"dolores_cannon_conversations_with_nostradamusv1":                    "Dolores Cannon — Conversations with Nostradamus Vol.1 (1989)",
+		// Seth / Jane Roberts
+		"the_nature_of_personal_reality":  "Seth / Jane Roberts — The Nature of Personal Reality (1974)",
+		"seth_speaks":                     "Seth / Jane Roberts — Seth Speaks (1972)",
+		"the_education_of_oversoul_seven": "Jane Roberts — The Education of Oversoul Seven (1973)",
+		// Upanishads
+		"108_upanishads": "The 108 Upanishads (~800 BCE – 200 CE)",
+		// Dolores Cannon
+		"dolores_cannon_conversations_with_nostradamusv1":   "Dolores Cannon — Conversations with Nostradamus Vol.1 (1989)",
+		"dolores_cannon_conversations_with_nostradamusv2":   "Dolores Cannon — Conversations with Nostradamus Vol.2 (1990)",
+		"dolores_cannon_conversations_with_nostradamusv3":   "Dolores Cannon — Conversations with Nostradamus Vol.3 (1992)",
+		"dolores_cannon_they_walked_with_jesus":             "Dolores Cannon — They Walked With Jesus (1994)",
+		"dolores_cannon_between_death_and_life":             "Dolores Cannon — Between Death and Life (1993)",
+		"dolores_cannon_the_convoluted_universe_book_one":   "Dolores Cannon — The Convoluted Universe Book 1 (2001)",
+		"dolores_cannon_the_convoluted_universe_book_two":   "Dolores Cannon — The Convoluted Universe Book 2 (2005)",
+		"dolores_cannon_the_convoluted_universe_book_three": "Dolores Cannon — The Convoluted Universe Book 3 (2008)",
+		// Mark / ROOT ACCESS
 		"root_access_a_misfits_complete_guide_to_reality_engineering":        "ROOT ACCESS — A Misfit's Complete Guide to Reality Engineering (2025)",
 		"the_dance_of_belief_unlocking_the_power_of_perception_and_creation": "The Dance of Belief — Mark J. Hubrich (2025)",
 		"the_misfits_guide_to_the_clairs":                                    "The Misfit's Guide to the Clairs",
 		"themisfit_spathtopower_fromburnouttobrilliance":                     "The Misfit's Path to Power — From Burnout to Brilliance",
-		"the_magus": "The Magus — Francis Barrett (1801)",
+		// Other
+		"the_magus":    "The Magus — Francis Barrett (1801)",
+		"the_kybalion": "The Kybalion — Three Initiates (1908)",
+		"the_emerald_tablet": "The Emerald Tablet (Hermes Trismegistus, ~700 CE)",
 	}
+
+	// normalize helper: lowercase, replace spaces/hyphens with underscores, strip non-alphanumeric
+	norm := func(s string) string {
+		s = strings.ToLower(strings.TrimSpace(s))
+		s = strings.NewReplacer(" ", "_", "-", "_", ".", "", "'", "", ":", "", ",", "").Replace(s)
+		return s
+	}
+
+	// try exact match first
 	if friendly, ok := names[sourceID]; ok {
 		return friendly
 	}
 	if friendly, ok := names[sourceFile]; ok {
 		return friendly
+	}
+
+	// try normalized match
+	normID := norm(sourceID)
+	normFile := norm(sourceFile)
+	for key, friendly := range names {
+		nk := norm(key)
+		if nk == normID || nk == normFile {
+			return friendly
+		}
+		// partial match: key is a substring of the source id/file or vice versa
+		if normID != "" && (strings.Contains(normID, nk) || strings.Contains(nk, normID)) {
+			return friendly
+		}
+		if normFile != "" && (strings.Contains(normFile, nk) || strings.Contains(nk, normFile)) {
+			return friendly
+		}
+	}
+
+	// log unmatched so we can add them to the map
+	if sourceID != "" || sourceFile != "" {
+		fmt.Fprintf(os.Stderr, "[receipts] unmatched source — id=%q file=%q\n", sourceID, sourceFile)
 	}
 
 	trimmed := strings.TrimSpace(sourceFile)
@@ -680,6 +733,22 @@ func slugify(s string) string {
 
 func isOpenRouterURL(url string) bool {
 	return strings.Contains(strings.ToLower(url), "openrouter.ai")
+}
+
+func resolveSynthesisModel(url, model string) string {
+	if !isOpenRouterURL(url) {
+		return model
+	}
+
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	switch normalized {
+	case "deepseek-reasoner", "deepseek/deepseek-r1":
+		return "deepseek/deepseek-r1"
+	case "deepseek-chat", "deepseek/deepseek-chat":
+		return "deepseek/deepseek-chat"
+	default:
+		return model
+	}
 }
 
 func strPtr(s string) *string { return &s }

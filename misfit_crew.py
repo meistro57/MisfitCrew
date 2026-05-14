@@ -58,6 +58,7 @@ OPENROUTER_EMBED_URL = os.getenv("OPENROUTER_EMBED_URL", "https://openrouter.ai/
 OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL")
 OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "MisfitCrew")
 CRITIC_PROVIDER = os.getenv("CRITIC_PROVIDER", "Ollama")
+OPENROUTER_CHAT_URL = os.getenv("OPENROUTER_CHAT_URL", "https://openrouter.ai/api/v1/chat/completions")
 OLLAMA_GEN_URL = os.getenv("OLLAMA_GEN_URL", "http://localhost:11434/api/generate")
 
 SOURCE_COLLECTION = "meta_reflections"
@@ -327,7 +328,9 @@ async def deepseek_analyze(payload: dict, api_key: str) -> tuple[str, str]:
 
 async def gemma_critique(report: str) -> str:
     prompt = f"{HGOS_CRITIC_PROMPT}\n{report}"
-    if CRITIC_PROVIDER.lower() == "openrouter":
+    critic_provider = (CRITIC_PROVIDER or "").strip().lower()
+
+    if critic_provider == "openrouter":
         async with httpx.AsyncClient(timeout=120.0) as http:
             resp = await http.post(
                 CRITIC_CHAT_URL,
@@ -338,16 +341,18 @@ async def gemma_critique(report: str) -> str:
                 },
             )
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
-    else:
-        # Ollama
-        async with httpx.AsyncClient(timeout=120.0) as http:
-            resp = await http.post(
-                OLLAMA_GEN_URL,
-                json={"model": CRITIC_MODEL, "prompt": prompt, "stream": False},
-            )
-            resp.raise_for_status()
-            return resp.json().get("response", "⚠️ Critic offline.")
+            content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+            if isinstance(content, list):
+                return "".join(part.get("text", "") for part in content if isinstance(part, dict))
+            return content or "⚠️ Critic offline."
+
+    async with httpx.AsyncClient(timeout=120.0) as http:
+        resp = await http.post(
+            OLLAMA_GEN_URL,
+            json={"model": CRITIC_MODEL, "prompt": prompt, "stream": False},
+        )
+        resp.raise_for_status()
+        return resp.json().get("response", "⚠️ Critic offline.")
 
 
 # --------------------------------------------------------- publish + ledger --
