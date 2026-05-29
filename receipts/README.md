@@ -17,11 +17,15 @@ Part of the MisfitCrew pipeline, downstream of `meta_reflections` and `misfit_re
 5. Writes Markdown to `./output/<concept>_<timestamp>.md`
 
 Output format:
+- YAML front matter with run metadata for downstream automation
 - **The Core Claim**
 - **The Receipts**
 - **Why The Convergence Matters**
 - **The Hardware Glitch**
 - **The Operative Question**
+- **Source Ledger** table with similarity, tone, and concepts
+- **Evidence Pack** appendix with source IDs, summaries, claims, concepts, and echoes
+- **Hardware Glitch Receipts** appendix with critic verdicts and report excerpts
 
 ---
 
@@ -53,6 +57,9 @@ go mod tidy
 
 # Custom output dir
 ./receipts --concept "non-linear time" --out ~/MisfitCrew/receipts/output
+
+# Leaner Markdown without raw source appendices
+./receipts --concept "non-linear time" --raw-receipts=false
 
 # Version
 ./receipts --version
@@ -108,4 +115,5 @@ output/<concept>_<timestamp>.md
 - On OpenRouter URLs, `deepseek-reasoner` and `deepseek-chat` map to `deepseek/deepseek-r1` and `deepseek/deepseek-chat`.
 - Embedding model is auto-selected from `claims_vec` size when recognized (3072 → `google/gemini-embedding-001`, 1536 → `openai/text-embedding-3-small`).
 - `misfit_reports` is optional; receipts still runs if no glitch matches are found.
+- Markdown output now includes a machine-readable YAML header, a source ledger, and raw evidence appendices by default. Use `--raw-receipts=false` when you only want the polished synthesis plus ledger.
 - Source name display mapping lives in `friendlySourceName()` in `receipts/cmd/main.go`.

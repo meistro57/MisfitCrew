@@ -1,3 +1,4 @@
+// receipts/cmd/main.go
 /*
 receipts — The "Look at this!!" engine.
 
@@ -78,6 +79,7 @@ type config struct {
 	outDir                string
 	listConcepts          bool
 	topConcepts           int
+	includeRawReceipts    bool
 }
 
 func loadConfig() config {
@@ -103,6 +105,7 @@ func loadConfig() config {
 	flag.StringVar(&cfg.deepseekModel, "model", cfg.deepseekModel, "DeepSeek model (deepseek-reasoner or deepseek-chat)")
 	flag.BoolVar(&cfg.listConcepts, "list-concepts", false, "List top canonical concepts from the corpus and exit")
 	flag.IntVar(&cfg.topConcepts, "top", 20, "How many concepts to show with --list-concepts")
+	flag.BoolVar(&cfg.includeRawReceipts, "raw-receipts", true, "Append raw source evidence and critic receipts to the Markdown output")
 	flag.StringVar(&cfg.reflectionsCollection, "collection", cfg.reflectionsCollection, "Qdrant reflections collection")
 	flag.BoolVar(new(bool), "version", false, "Print version and exit") // handled below
 	flag.Parse()
@@ -597,29 +600,30 @@ func synthesize(
 
 // ── output ────────────────────────────────────────────────────────────────────
 
-func writeOutput(outDir, concept, reasoning, document string, refs []reflection) error {
-	if err := os.MkdirAll(outDir, 0755); err != nil {
+func writeOutput(cfg config, reasoning, document string, refs []reflection, glitches []glitch) error {
+	if err := os.MkdirAll(cfg.outDir, 0755); err != nil {
 		return err
 	}
-	slug := slugify(concept)
-	ts := time.Now().Format("2006-01-02_15-04")
-	filename := fmt.Sprintf("%s_%s.md", slug, ts)
-	path := filepath.Join(outDir, filename)
+	slug := slugify(cfg.concept)
+	ts := time.Now()
+	filename := fmt.Sprintf("%s_%s.md", slug, ts.Format("2006-01-02_15-04"))
+	path := filepath.Join(cfg.outDir, filename)
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("# The Receipts: %q\n\n", concept))
-	sb.WriteString(fmt.Sprintf("*Generated %s from %d source traditions*\n\n", time.Now().Format("January 2, 2006 15:04"), len(refs)))
-	sb.WriteString("---\n\n")
+	writeReceiptHeader(&sb, cfg, ts, refs, glitches)
 	sb.WriteString(document)
 	sb.WriteString("\n\n---\n\n")
-	sb.WriteString("## Sources Used\n\n")
-	for i, r := range refs {
-		sb.WriteString(fmt.Sprintf("%d. **%s** (similarity: %.3f)\n", i+1, friendlySourceName(r.SourceID, r.SourceFile), r.Score))
+	writeSourceLedger(&sb, refs)
+
+	if cfg.includeRawReceipts {
+		writeEvidencePack(&sb, refs)
+		writeGlitchAppendix(&sb, glitches)
 	}
+
 	if reasoning != "" {
 		sb.WriteString("\n\n<details>\n<summary>R1 Reasoning Chain</summary>\n\n")
-		sb.WriteString("```\n")
-		sb.WriteString(reasoning)
+		sb.WriteString("```text\n")
+		sb.WriteString(strings.TrimSpace(reasoning))
 		sb.WriteString("\n```\n\n</details>\n")
 	}
 
@@ -628,6 +632,142 @@ func writeOutput(outDir, concept, reasoning, document string, refs []reflection)
 	}
 	fmt.Printf("✅ Wrote: %s\n", path)
 	return nil
+}
+
+func writeReceiptHeader(sb *strings.Builder, cfg config, generatedAt time.Time, refs []reflection, glitches []glitch) {
+	escapedConcept := strings.ReplaceAll(cfg.concept, "\"", "\\\"")
+	sb.WriteString("---\n")
+	sb.WriteString(fmt.Sprintf("title: \"The Receipts: %s\"\n", escapedConcept))
+	sb.WriteString(fmt.Sprintf("concept: \"%s\"\n", escapedConcept))
+	sb.WriteString(fmt.Sprintf("generated_at: %q\n", generatedAt.Format(time.RFC3339)))
+	sb.WriteString(fmt.Sprintf("source_traditions: %d\n", len(refs)))
+	sb.WriteString(fmt.Sprintf("hardware_glitches: %d\n", len(glitches)))
+	sb.WriteString(fmt.Sprintf("model: %q\n", resolveSynthesisModel(cfg.deepseekURL, cfg.deepseekModel)))
+	sb.WriteString(fmt.Sprintf("embedding_model: %q\n", cfg.embedModel))
+	sb.WriteString("---\n\n")
+
+	sb.WriteString(fmt.Sprintf("# The Receipts: %q\n\n", cfg.concept))
+	sb.WriteString(fmt.Sprintf("*Generated %s from %d source traditions, with %d Hardware Glitch receipts.*\n\n",
+		generatedAt.Format("2 January 2006 15:04"), len(refs), len(glitches)))
+	sb.WriteString("> Pattern recognition first; victory lap later. Here are the receipts, the ledger, and the awkward bits in one place.\n\n")
+	sb.WriteString("---\n\n")
+}
+
+func writeSourceLedger(sb *strings.Builder, refs []reflection) {
+	sb.WriteString("## Source Ledger\n\n")
+	if len(refs) == 0 {
+		sb.WriteString("No source traditions were available for this run.\n")
+		return
+	}
+	sb.WriteString("| # | Source | Similarity | Tone | Concepts |\n")
+	sb.WriteString("|---:|---|---:|---|---|\n")
+	for i, r := range refs {
+		concepts := strings.Join(limitStrings(r.Concepts, 5), ", ")
+		if concepts == "" {
+			concepts = "—"
+		}
+		tone := strings.TrimSpace(r.Tone)
+		if tone == "" {
+			tone = "—"
+		}
+		sb.WriteString(fmt.Sprintf("| %d | %s | %.3f | %s | %s |\n",
+			i+1,
+			markdownTableCell(friendlySourceName(r.SourceID, r.SourceFile)),
+			r.Score,
+			markdownTableCell(tone),
+			markdownTableCell(concepts),
+		))
+	}
+}
+
+func writeEvidencePack(sb *strings.Builder, refs []reflection) {
+	sb.WriteString("\n## Evidence Pack\n\n")
+	sb.WriteString("Raw-ish source material used to steer the synthesis. Useful for auditing the final narrative without spelunking through Qdrant like a caffeinated badger.\n\n")
+	for i, r := range refs {
+		sb.WriteString(fmt.Sprintf("### %d. %s\n\n", i+1, friendlySourceName(r.SourceID, r.SourceFile)))
+		sb.WriteString(fmt.Sprintf("- **Similarity:** %.3f\n", r.Score))
+		if r.SourceID != "" {
+			sb.WriteString(fmt.Sprintf("- **Source ID:** `%s`\n", r.SourceID))
+		}
+		if r.SourceFile != "" {
+			sb.WriteString(fmt.Sprintf("- **Source file:** `%s`\n", r.SourceFile))
+		}
+		if r.Tone != "" {
+			sb.WriteString(fmt.Sprintf("- **Tone:** %s\n", r.Tone))
+		}
+		if len(r.Concepts) > 0 {
+			sb.WriteString(fmt.Sprintf("- **Concepts:** %s\n", strings.Join(limitStrings(r.Concepts, 12), ", ")))
+		}
+		if len(r.Echoes) > 0 {
+			sb.WriteString(fmt.Sprintf("- **Echoes:** %s\n", strings.Join(limitStrings(r.Echoes, 12), ", ")))
+		}
+		if strings.TrimSpace(r.Summary) != "" {
+			sb.WriteString(fmt.Sprintf("\n**Summary**\n\n%s\n\n", strings.TrimSpace(r.Summary)))
+		}
+		if len(r.Claims) > 0 {
+			sb.WriteString("**Claims**\n\n")
+			for _, claim := range limitStrings(r.Claims, 8) {
+				if strings.TrimSpace(claim) != "" {
+					sb.WriteString(fmt.Sprintf("- %s\n", strings.TrimSpace(claim)))
+				}
+			}
+			sb.WriteString("\n")
+		}
+	}
+}
+
+func writeGlitchAppendix(sb *strings.Builder, glitches []glitch) {
+	sb.WriteString("## Hardware Glitch Receipts\n\n")
+	if len(glitches) == 0 {
+		sb.WriteString("No critic receipts were found for this run. Suspiciously tidy, but there we are.\n")
+		return
+	}
+	for i, g := range glitches {
+		source := friendlySourceName("", g.SourceFile)
+		sb.WriteString(fmt.Sprintf("### Glitch %d: %s\n\n", i+1, source))
+		sb.WriteString(fmt.Sprintf("- **Similarity:** %.3f\n", g.Score))
+		if verdict := strings.TrimSpace(g.Verdict); verdict != "" {
+			sb.WriteString(fmt.Sprintf("- **Verdict:** %s\n", trimForMarkdown(verdict, 500)))
+		}
+		if report := strings.TrimSpace(g.Report); report != "" {
+			sb.WriteString(fmt.Sprintf("\n%s\n\n", trimForMarkdown(report, 1400)))
+		}
+	}
+}
+
+func limitStrings(values []string, max int) []string {
+	if max <= 0 || len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, min(len(values), max))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+		if len(out) >= max {
+			break
+		}
+	}
+	return out
+}
+
+func markdownTableCell(value string) string {
+	value = strings.ReplaceAll(value, "\n", " ")
+	value = strings.ReplaceAll(value, "|", "\\|")
+	return strings.TrimSpace(value)
+}
+
+func trimForMarkdown(value string, maxRunes int) string {
+	value = strings.TrimSpace(value)
+	if maxRunes <= 0 {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= maxRunes {
+		return value
+	}
+	return strings.TrimSpace(string(runes[:maxRunes])) + "…"
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -656,8 +796,8 @@ func friendlySourceName(sourceID, sourceFile string) string {
 		"the_misfits_guide_to_the_clairs":                                    "The Misfit's Guide to the Clairs",
 		"themisfit_spathtopower_fromburnouttobrilliance":                     "The Misfit's Path to Power — From Burnout to Brilliance",
 		// Other
-		"the_magus":    "The Magus — Francis Barrett (1801)",
-		"the_kybalion": "The Kybalion — Three Initiates (1908)",
+		"the_magus":          "The Magus — Francis Barrett (1801)",
+		"the_kybalion":       "The Kybalion — Three Initiates (1908)",
 		"the_emerald_tablet": "The Emerald Tablet (Hermes Trismegistus, ~700 CE)",
 	}
 
@@ -919,7 +1059,7 @@ func main() {
 	}
 
 	// write output
-	if err := writeOutput(cfg.outDir, cfg.concept, reasoning, document, refs); err != nil {
+	if err := writeOutput(cfg, reasoning, document, refs, glitches); err != nil {
 		fmt.Fprintf(os.Stderr, "write: %v\n", err)
 		os.Exit(1)
 	}
