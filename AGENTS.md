@@ -27,6 +27,7 @@ python canon_alignment_report.py --help
 # Mining pipeline
 python misfit_crew.py
 python misfit_crew.py --limit 10 --sleep 1 --max-attempts 3
+python misfit_crew.py --workers 4 --sleep 0.5 --limit 100
 
 # Pull reports from misfit_reports
 python misfit_report_pull.py --list
@@ -83,6 +84,7 @@ python canon_alignment_report.py --collection meta_reflections --out ./reviews/c
    - Upsert to `misfit_reports` with named vectors + payload.
    - Append to `misfit_ledger.json` and clear failure record on success.
 7. Print throughput + ETA counters; obey `--limit`; support graceful SIGINT stop.
+8. Optional parallel mining via `--workers` uses a semaphore for capped concurrency; `--sleep` is between submissions and stop waits for in-flight wells to finish.
 
 ### 2) Report extraction (`misfit_report_pull.py`)
 - Scrolls `misfit_reports` and either:

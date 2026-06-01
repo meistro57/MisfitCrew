@@ -81,7 +81,10 @@ If `DEEPSEEK_CHAT_URL` points to OpenRouter, `misfit_crew.py` auto-uses `OPENROU
 ```bash
 python /home/mark/MisfitCrew/misfit_crew.py
 python /home/mark/MisfitCrew/misfit_crew.py --limit 10 --sleep 1 --max-attempts 3
+python /home/mark/MisfitCrew/misfit_crew.py --workers 4 --sleep 0.5 --limit 100
 ```
+
+`--workers` controls concurrent wells (default `1`). `--limit` is global across all workers, and `--sleep` is applied between submissions.
 
 ### 2) Pull report(s) from `misfit_reports`
 

@@ -81,6 +81,7 @@ BACKOFF_SCHEDULE = [2, 8, 30]
 client = QdrantClient(QDRANT_URL)
 
 STOP = False
+STATE_LOCK: Optional[asyncio.Lock] = None
 
 
 def handle_sigint(signum, frame):
@@ -172,7 +173,7 @@ def clear_failure(failures: dict, point_id: str) -> None:
 # --------------------------------------------------------- source iteration --
 
 def iter_source_unmined(mined: set[str], dead: set[str]):
-    """Scroll meta_reflections in pages, yield points that aren't mined or dead."""
+    """Scroll meta_reflections in pages, yield points that aren't mined, dead, or empty."""
     offset = None
     while True:
         points, offset = client.scroll(
@@ -185,6 +186,14 @@ def iter_source_unmined(mined: set[str], dead: set[str]):
         for p in points:
             pid = str(p.id)
             if pid in mined or pid in dead:
+                continue
+            # Skip reflections flagged as empty by the reflect loop — nothing
+            # for DeepSeek to mine, and sending them wastes API calls.
+            if p.payload and p.payload.get("is_empty_reflection"):
+                continue
+            # Skip reflections whose source chunk was graphability-skipped.
+            # Those chunks were low/very_low yield — the reflection will be thin.
+            if p.payload and p.payload.get("graphability_extracted") is False:
                 continue
             yield p
         if offset is None:
@@ -386,7 +395,7 @@ async def publish(point_id: str, source: str, reasoning: str, report: str, verdi
 
 
 def append_ledger(point_id: str, source: str, reasoning: str, report: str, verdict: str) -> None:
-    """Audit log only. Append-only. Never read as source of truth for exclusion."""
+    """Audit log only. Append-only JSONL. Never read as source of truth for exclusion."""
     entry = {
         "id": point_id,
         "source": source,
@@ -395,19 +404,9 @@ def append_ledger(point_id: str, source: str, reasoning: str, report: str, verdi
         "verdict": verdict,
         "timestamp": datetime.now().isoformat(),
     }
-    # append-by-rewrite is fine at this scale; swap for JSONL if you ever go big
-    ledger = []
-    if os.path.exists(LEDGER_FILE):
-        try:
-            with open(LEDGER_FILE, "r") as f:
-                ledger = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            ledger = []
-    ledger.append(entry)
-    tmp = LEDGER_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(ledger, f, indent=2)
-    os.replace(tmp, LEDGER_FILE)
+    ledger_path = Path(LEDGER_FILE).with_suffix(".jsonl")
+    with open(ledger_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
 
 
 # ------------------------------------------------------------------ runner ---
@@ -427,11 +426,19 @@ async def process_one(target, failures: dict, max_attempts: int, api_key: str) -
         if not ok:
             raise RuntimeError("embedding failed — report not published")
         append_ledger(pid, source, reasoning, report, verdict)
-        clear_failure(failures, pid)
+        if STATE_LOCK:
+            async with STATE_LOCK:
+                clear_failure(failures, pid)
+        else:
+            clear_failure(failures, pid)
         print("✅ Well capped and vector-indexed.")
         return "ok"
     except Exception as e:
-        attempts = record_failure(failures, pid, f"{type(e).__name__}: {e}")
+        if STATE_LOCK:
+            async with STATE_LOCK:
+                attempts = record_failure(failures, pid, f"{type(e).__name__}: {e}")
+        else:
+            attempts = record_failure(failures, pid, f"{type(e).__name__}: {e}")
         if attempts >= max_attempts:
             print(f"☠️  Well declared dead after {attempts} attempts: {e}")
             return "dead"
@@ -439,8 +446,8 @@ async def process_one(target, failures: dict, max_attempts: int, api_key: str) -
         return "fail"
 
 
-async def run_conductor(args):
-    global STOP
+async def run_conductor(args, workers: int):
+    global STOP, STATE_LOCK
 
     analysis_api_key = resolve_analysis_api_key()
     if not analysis_api_key:
@@ -451,7 +458,7 @@ async def run_conductor(args):
         return 1
 
     print(f"🚀 Misfit Crew: Starting Full-Cycle Archaeology Loop...")
-    print(f"[config] qdrant={QDRANT_URL} max_attempts={args.max_attempts} sleep={args.sleep}s")
+    print(f"[config] qdrant={QDRANT_URL} max_attempts={args.max_attempts} sleep={args.sleep}s workers={workers}")
     print(f"[config] analysis_provider={ANALYSIS_PROVIDER} model={DEEPSEEK_MODEL}")
     print(f"[config] embed_provider={EMBED_PROVIDER} model={EMBED_MODEL}")
     print(f"[config] critic_provider={CRITIC_PROVIDER} model={CRITIC_MODEL}")
@@ -482,32 +489,93 @@ async def run_conductor(args):
     deaths = 0
     t0 = time.time()
 
-    for target in iter_source_unmined(mined, dead):
-        if STOP:
-            break
+    STATE_LOCK = None
 
-        result = await process_one(target, failures, args.max_attempts, analysis_api_key)
-        processed += 1
-        if result == "ok":
-            successes += 1
-            mined.add(str(target.id))
-        elif result == "dead":
-            deaths += 1
-            dead.add(str(target.id))
-        else:
-            fails += 1
+    if workers <= 1:
+        for target in iter_source_unmined(mined, dead):
+            if STOP:
+                break
 
-        elapsed = time.time() - t0
-        rate = processed / elapsed if elapsed > 0 else 0
-        eta = (remaining - processed) / rate if rate > 0 else 0
-        print(f"[{processed}/{remaining}] ok={successes} fail={fails} dead={deaths}  "
-              f"({rate*60:.1f}/min, eta {eta/60:.0f}m)")
+            result = await process_one(target, failures, args.max_attempts, analysis_api_key)
+            processed += 1
+            if result == "ok":
+                successes += 1
+                mined.add(str(target.id))
+            elif result == "dead":
+                deaths += 1
+                dead.add(str(target.id))
+            else:
+                fails += 1
 
-        if args.limit > 0 and processed >= args.limit:
-            print("[plan] --limit reached")
-            break
+            elapsed = time.time() - t0
+            rate = processed / elapsed if elapsed > 0 else 0
+            eta = (remaining - processed) / rate if rate > 0 else 0
+            print(f"[{processed}/{remaining}] ok={successes} fail={fails} dead={deaths}  "
+                  f"({rate*60:.1f}/min, eta {eta/60:.0f}m)")
 
-        await asyncio.sleep(args.sleep)
+            if args.limit > 0 and processed >= args.limit:
+                print("[plan] --limit reached")
+                break
+
+            await asyncio.sleep(args.sleep)
+    else:
+        semaphore = asyncio.Semaphore(args.workers)
+        state_lock = asyncio.Lock()
+        STATE_LOCK = state_lock
+        in_flight: set[asyncio.Task] = set()
+        submitted = 0
+        limit_reached = False
+
+        async def run_target(target):
+            nonlocal processed, successes, fails, deaths
+            async with semaphore:
+                result = await process_one(target, failures, args.max_attempts, analysis_api_key)
+            async with state_lock:
+                processed += 1
+                if result == "ok":
+                    successes += 1
+                    mined.add(str(target.id))
+                elif result == "dead":
+                    deaths += 1
+                    dead.add(str(target.id))
+                else:
+                    fails += 1
+
+                elapsed = time.time() - t0
+                rate = processed / elapsed if elapsed > 0 else 0
+                eta = (remaining - processed) / rate if rate > 0 else 0
+                print(f"[{processed}/{remaining}] ok={successes} fail={fails} dead={deaths}  "
+                      f"({rate*60:.1f}/min, eta {eta/60:.0f}m)")
+
+        try:
+            for target in iter_source_unmined(mined, dead):
+                if STOP:
+                    break
+                if args.limit > 0 and submitted >= args.limit:
+                    limit_reached = True
+                    break
+
+                while len(in_flight) >= workers:
+                    done, pending = await asyncio.wait(in_flight, return_when=asyncio.FIRST_COMPLETED)
+                    await asyncio.gather(*done)
+                    in_flight = pending
+                    if STOP:
+                        break
+
+                if STOP:
+                    break
+
+                in_flight.add(asyncio.create_task(run_target(target)))
+                submitted += 1
+                await asyncio.sleep(args.sleep)
+
+            if limit_reached:
+                print("[plan] --limit reached")
+
+            if in_flight:
+                await asyncio.gather(*in_flight)
+        finally:
+            STATE_LOCK = None
 
     elapsed = time.time() - t0
     print(f"\n[done] {processed} wells processed in {elapsed/60:.1f}m")
@@ -524,10 +592,15 @@ def main():
                         help=f"seconds between wells (default {DEFAULT_SLEEP_BETWEEN})")
     parser.add_argument("--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS,
                         help=f"retries per well before declaring it dead (default {DEFAULT_MAX_ATTEMPTS})")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="parallel well workers (default 1)")
     args = parser.parse_args()
 
+    if args.workers < 1:
+        parser.error("--workers must be >= 1")
+
     signal.signal(signal.SIGINT, handle_sigint)
-    sys.exit(asyncio.run(run_conductor(args)))
+    sys.exit(asyncio.run(run_conductor(args, args.workers)))
 
 
 if __name__ == "__main__":
