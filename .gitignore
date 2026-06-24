@@ -31,5 +31,10 @@ Thumbs.db
 *.bak
 *.log
 
+# Runtime state logs (keep local)
+misfit_failures.json
+misfit_ledger.json
+misfit_ledger.jsonl
+
 # Windows alternate stream artifacts
 *:Zone.Identifier

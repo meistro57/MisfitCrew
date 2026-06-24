@@ -89,6 +89,7 @@ REPORTS_COLLECTION=misfit_reports
 Notes:
 - Qdrant connection is gRPC at `QDRANT_HOST:6334`.
 - `OPENROUTER_API_KEY` is required for embeddings and synthesis when `DEEPSEEK_CHAT_URL` is an OpenRouter endpoint.
+- When launched through `../run_all_reports.sh`, repo-root `.env` is sourced and exported before each receipts run so stale shell keys do not override project keys.
 
 ---
 

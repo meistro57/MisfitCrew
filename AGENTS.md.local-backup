@@ -1,0 +1,150 @@
+# AGENTS.md
+
+## Project Overview
+
+This repository is a small Python data-processing/reporting workspace centered on Qdrant collections:
+
+- `misfit_crew.py`: end-to-end mining pipeline from `meta_reflections` into `misfit_reports`
+- `misfit_report_pull.py`: exports `misfit_reports` entries into Markdown review files
+- `canon_alignment_report.py`: corpus-level clustering/frequency analysis over `meta_reflections`
+- `reviews/`: generated Markdown outputs
+- `misfit_ledger.json` / `misfit_failures.json`: runtime state/audit artifacts for `misfit_crew.py`
+
+A local `venv/` directory exists in-repo; avoid treating it as project source.
+
+## Repository Structure
+
+- Root scripts (entrypoints):
+  - `misfit_crew.py`
+  - `misfit_report_pull.py`
+  - `canon_alignment_report.py`
+- Data/state files:
+  - `misfit_ledger.json` (append-only audit log)
+  - `misfit_failures.json` (retry/dead-well tracking)
+- Output directory:
+  - `reviews/` (report markdown, including backups)
+
+No package layout (`src/`, modules, setup/pyproject) was found; this is script-driven.
+
+## Existing Rule/Instruction Files
+
+Searched for these and none were found:
+
+- `.cursor/rules/*.md`
+- `.cursorrules`
+- `.github/copilot-instructions.md`
+- `claude.md`
+- `agents.md`
+
+No prior in-repo agent rule files were available to merge.
+
+## Runtime Dependencies (Observed from Imports/Docstrings)
+
+Observed imports/docstrings indicate use of:
+
+- `qdrant-client`
+- `httpx`
+- `python-dotenv` (`dotenv`)
+- `numpy`
+- `scikit-learn`
+
+`misfit_crew.py` also depends on external services/APIs:
+
+- Qdrant (`QDRANT_URL`, default `http://localhost:6333`)
+- DeepSeek API (`DEEPSEEK_API_KEY`)
+- OpenRouter embeddings (`OPENROUTER_API_KEY`, model `google/gemini-embedding-001`)
+- Ollama local generate endpoint (`http://localhost:11434/api/generate`, model `gemma4:latest`)
+
+## Essential Commands
+
+No Makefile, CI workflows, or test runner config were found. Use script entrypoints directly.
+
+### 1) Run mining pipeline
+
+```bash
+python /home/mark/MisfitCrew/misfit_crew.py
+python /home/mark/MisfitCrew/misfit_crew.py --limit 10 --sleep 1 --max-attempts 3
+```
+
+### 2) Pull report(s) from `misfit_reports`
+
+```bash
+python /home/mark/MisfitCrew/misfit_report_pull.py --list
+python /home/mark/MisfitCrew/misfit_report_pull.py --source <source_file.pdf>
+python /home/mark/MisfitCrew/misfit_report_pull.py --all --out /home/mark/MisfitCrew/reviews
+```
+
+### 3) Generate canon alignment report
+
+```bash
+python /home/mark/MisfitCrew/canon_alignment_report.py
+python /home/mark/MisfitCrew/canon_alignment_report.py --k 40 --sample 10000
+python /home/mark/MisfitCrew/canon_alignment_report.py --collection meta_reflections --out /home/mark/MisfitCrew/reviews/canon_alignment_report.md
+```
+
+### 4) Safe smoke checks when editing
+
+```bash
+python /home/mark/MisfitCrew/misfit_crew.py --help
+python /home/mark/MisfitCrew/misfit_report_pull.py --help
+python /home/mark/MisfitCrew/canon_alignment_report.py --help
+```
+
+## Code Patterns and Conventions
+
+Observed common patterns across scripts:
+
+- Script-first architecture with `main()` + `if __name__ == "__main__":`
+- Extensive `argparse` CLI flags for run-time behavior
+- Qdrant access via `client.scroll(...)` loops with `offset` pagination
+- Payload normalization/defensive parsing (`payload.get(...)`, tolerant timestamp parsing)
+- Markdown assembly via line list + `"\n".join(lines)`
+- File outputs written with explicit UTF-8 and parent-directory creation
+
+### Type/style patterns
+
+- Uses Python type hints broadly (`list[dict]`, `Optional[...]`, tuple return types)
+- Uses constants for defaults/config near top of file
+- Uses standard library only for orchestration; ML/vector ops in `canon_alignment_report.py`
+
+## Testing Approach (What Exists)
+
+No `tests/` directory or `test*.py` files were found at repo root.
+
+Practical verification in this repository is currently command/smoke based:
+
+- `--help` invocations for CLI validity
+- targeted script runs against live Qdrant/API environment
+- checking generated markdown outputs under `reviews/`
+
+## Gotchas / Non-obvious Behavior
+
+### `misfit_crew.py`
+
+- `misfit_reports` is the source of truth for “already mined” IDs (`load_mined_ids()`); the ledger is audit-only.
+- `misfit_failures.json` controls retry/dead status; entries at or above `--max-attempts` are skipped as dead.
+- Destination collection is auto-created as **named vectors** (`claims_vec`, `summary_vec`), both 3072-d cosine.
+- Embedding publish requires two vectors (report + verdict). Missing embedding result aborts publish.
+- SIGINT is graceful on first Ctrl-C (finish current item), hard-exit on second.
+
+### `misfit_report_pull.py`
+
+- `--list` enumerates available `source_file` values; use this to avoid empty single-source pulls.
+- Filenames are sanitized via `safe_filename()` and written as `<stem>_review.md`.
+
+### `canon_alignment_report.py`
+
+- Concept token handling is intentionally tolerant (list or comma-separated string).
+- If vectors are named, first vector is selected automatically.
+- KMeans uses normalized vectors as cosine-proxy behavior.
+
+## Agent Workflow Recommendations for This Repo
+
+1. Ignore `venv/` and focus on root scripts + `reviews/` outputs.
+2. When changing pipeline behavior, verify both data path and output artifacts:
+   - Qdrant read/write logic
+   - ledger/failure side effects
+   - markdown output format
+3. Prefer adding/maintaining CLI flags over hard-coded behavior changes.
+4. For validation, run the script-specific `--help` first, then minimal real run (`--limit` / `--sample`) when environment is available.
+5. Do not assume automated tests exist; none were observed.

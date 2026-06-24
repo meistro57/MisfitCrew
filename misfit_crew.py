@@ -172,14 +172,34 @@ def clear_failure(failures: dict, point_id: str) -> None:
 
 # --------------------------------------------------------- source iteration --
 
-def iter_source_unmined(mined: set[str], dead: set[str]):
-    """Scroll meta_reflections in pages, yield points that aren't mined, dead, or empty."""
+def iter_source_unmined(mined: set[str], dead: set[str], interesting_only: bool = False):
+    """Scroll meta_reflections in pages, yield points that aren't mined, dead, or empty.
+
+    If interesting_only=True, restricts to reflections flagged loop_interesting=true
+    or loop_contradiction=true by the reflect_loop. These are the highest-signal
+    chunks and worth mining first before running the full corpus pass.
+    """
     offset = None
     while True:
+        scroll_filter = None
+        if interesting_only:
+            scroll_filter = models.Filter(
+                should=[
+                    models.FieldCondition(
+                        key="loop_interesting",
+                        match=models.MatchValue(value=True),
+                    ),
+                    models.FieldCondition(
+                        key="loop_contradiction",
+                        match=models.MatchValue(value=True),
+                    ),
+                ]
+            )
         points, offset = client.scroll(
             collection_name=SOURCE_COLLECTION,
             limit=DEFAULT_SCROLL_BATCH,
             offset=offset,
+            scroll_filter=scroll_filter,
             with_payload=True,
             with_vectors=False,
         )
@@ -187,12 +207,8 @@ def iter_source_unmined(mined: set[str], dead: set[str]):
             pid = str(p.id)
             if pid in mined or pid in dead:
                 continue
-            # Skip reflections flagged as empty by the reflect loop — nothing
-            # for DeepSeek to mine, and sending them wastes API calls.
             if p.payload and p.payload.get("is_empty_reflection"):
                 continue
-            # Skip reflections whose source chunk was graphability-skipped.
-            # Those chunks were low/very_low yield — the reflection will be thin.
             if p.payload and p.payload.get("graphability_extracted") is False:
                 continue
             yield p
@@ -483,6 +499,9 @@ async def run_conductor(args, workers: int):
         remaining = min(remaining, args.limit)
         print(f"[plan]  --limit {args.limit} applied")
 
+    if args.interesting_only:
+        print(f"[plan]  --interesting-only: mining loop_interesting + loop_contradiction flags first")
+
     processed = 0
     successes = 0
     fails = 0
@@ -492,7 +511,7 @@ async def run_conductor(args, workers: int):
     STATE_LOCK = None
 
     if workers <= 1:
-        for target in iter_source_unmined(mined, dead):
+        for target in iter_source_unmined(mined, dead, args.interesting_only):
             if STOP:
                 break
 
@@ -548,7 +567,7 @@ async def run_conductor(args, workers: int):
                       f"({rate*60:.1f}/min, eta {eta/60:.0f}m)")
 
         try:
-            for target in iter_source_unmined(mined, dead):
+            for target in iter_source_unmined(mined, dead, args.interesting_only):
                 if STOP:
                     break
                 if args.limit > 0 and submitted >= args.limit:
@@ -594,6 +613,8 @@ def main():
                         help=f"retries per well before declaring it dead (default {DEFAULT_MAX_ATTEMPTS})")
     parser.add_argument("--workers", type=int, default=1,
                         help="parallel well workers (default 1)")
+    parser.add_argument("--interesting-only", action="store_true",
+                        help="mine only reflections flagged loop_interesting=true or loop_contradiction=true")
     args = parser.parse_args()
 
     if args.workers < 1:

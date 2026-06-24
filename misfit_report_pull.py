@@ -43,8 +43,8 @@ from qdrant_client.http import models as qm
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 COLLECTION = "misfit_reports"
-DEFAULT_SOURCE = "ROOT-ACCESS_A-Misfits-Complete-Guide-to-Reality-Engineering.md"
-OUTPUT_DIR = Path("./ROOTreviews")
+DEFAULT_SOURCE = None  # if None, --list is shown and user must pick a source
+OUTPUT_DIR = Path("./reviews")
 SCROLL_BATCH = 100
 
 
@@ -226,7 +226,7 @@ def main() -> int:
     ap.add_argument(
         "--source",
         default=DEFAULT_SOURCE,
-        help=f"source_file to pull (default: {DEFAULT_SOURCE})",
+        help="source_file to pull (use --list to see available sources)",
     )
     ap.add_argument(
         "--list",
@@ -277,6 +277,18 @@ def main() -> int:
         return 0
 
     # single source mode
+    if not args.source:
+        print("No --source specified. Available sources:\n")
+        counts = list_source_files(client)
+        if not counts:
+            print("No reports found in misfit_reports.")
+            return 0
+        width = max(len(sf) for sf in counts)
+        for sf, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            print(f"  {sf.ljust(width)}  {n:>5}")
+        print(f"\nRun with --source <name> to pull a review.")
+        return 0
+
     reports = load_reports_for_source(client, args.source)
     if not reports:
         print(

@@ -117,6 +117,13 @@ cd /home/mark/MisfitCrew/mcp-servers
 make all
 ```
 
+### 6) Run full all-reports batch
+
+```bash
+cd /home/mark/MisfitCrew
+./run_all_reports.sh
+```
+
 ## Smoke checks
 
 ```bash
@@ -129,4 +136,6 @@ python /home/mark/MisfitCrew/canon_alignment_report.py --help
 
 - No formal `tests/` suite is currently present for Python; validation is CLI smoke checks and targeted script runs.
 - `receipts/cmd/main.go` loads env from `../.env` first, then local `.env`.
+- `run_all_reports.sh` now sources and exports repo-root `.env` before running steps, so batch runs use current project keys instead of stale shell exports.
+- `canon_alignment_report.py` now uses `QDRANT_TIMEOUT` (seconds, default `120`) plus retry controls (`CANON_SCROLL_RETRIES`, `CANON_SCROLL_BATCH`) to reduce scroll timeout failures on large corpora.
 - `.gitignore` excludes local env, venv, cache files, logs/backups, and `Zone.Identifier` artifacts.

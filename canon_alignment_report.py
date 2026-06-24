@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -53,15 +54,31 @@ from sklearn.cluster import MiniBatchKMeans
 # ---------------------------------------------------------------- config ----
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
+QDRANT_TIMEOUT = float(os.environ.get("QDRANT_TIMEOUT", "120"))
 DEFAULT_COLLECTION = "meta_reflections"
 DEFAULT_K = 30
 DEFAULT_SAMPLE = 0  # 0 = use all
 DEFAULT_OUTPUT = Path("./reviews/canon_alignment_report.md")
-SCROLL_BATCH = 200
+SCROLL_BATCH = int(os.environ.get("CANON_SCROLL_BATCH", "200"))
+SCROLL_MAX_RETRIES = int(os.environ.get("CANON_SCROLL_RETRIES", "5"))
 TOP_CONCEPTS = 80          # top-N concepts in the frequency table
-EXEMPLARS_PER_CLUSTER = 5  # closest-to-centroid reflections per cluster
+EXEMPLARS_PER_CLUSTER = 3  # closest-to-centroid reflections per cluster (was 5)
 CONCEPTS_PER_CLUSTER = 10  # top concept tokens per cluster
-CANONICAL_THRESHOLD = 5    # source_files-per-cluster to be "canonical" (default; overridable via --canonical-threshold)
+CANONICAL_THRESHOLD = 15   # source_files-per-cluster to be "canonical"; corpus is now 114 sources
+PROVINCIAL_MICRO_THRESHOLD = 200  # provincial clusters below this size get a stub, not full treatment
+
+# Noise cluster detection — summary phrases that indicate TOC / index / bibliography chunks.
+# If a cluster's exemplar summaries collectively match enough of these, it gets stubbed out.
+_NOISE_SUMMARY_PATTERNS = [
+    "table of contents", "bibliograph", "index listing", "catalog description",
+    "footnotes and bibliographic", "provides no substantive text", "bibliographic reference",
+    "provides no substantive", "consists only of", "list of", "listing specific",
+    "reference list", "catalog of", "annotated bibliography",
+]
+_NOISE_CONCEPT_VOCAB = {
+    "bibliography", "index", "table of contents", "footnote", "footnotes",
+    "citation", "ibid", "op cit", "endnote", "endnotes", "appendix",
+}
 
 
 # ---------------------------------------------------------------- load ------
@@ -79,19 +96,37 @@ def load_all_reflections(
     fields = ["source_file", "concepts", "summary", "page", "tone"]
     print(f"Loading reflections from {collection!r}...")
     while True:
-        points, offset = client.scroll(
-            collection_name=collection,
-            limit=SCROLL_BATCH,
-            with_payload=fields,
-            with_vectors=True,
-            offset=offset,
-        )
+        for attempt in range(SCROLL_MAX_RETRIES):
+            try:
+                points, offset = client.scroll(
+                    collection_name=collection,
+                    limit=SCROLL_BATCH,
+                    with_payload=fields,
+                    with_vectors=True,
+                    offset=offset,
+                )
+                break
+            except Exception as exc:
+                if attempt >= SCROLL_MAX_RETRIES - 1:
+                    raise RuntimeError(
+                        f"qdrant scroll failed after {SCROLL_MAX_RETRIES} attempts at offset={offset}: {exc}"
+                    ) from exc
+                delay = min(30, 2 ** attempt)
+                print(
+                    f"  scroll failed at offset={offset}; retry {attempt + 1}/{SCROLL_MAX_RETRIES - 1} in {delay}s ({exc})"
+                )
+                time.sleep(delay)
         for p in points:
             payload = p.payload or {}
             vec = p.vector
             if isinstance(vec, dict):
-                # named vectors — grab the first
-                vec = next(iter(vec.values()))
+                # named vectors — prefer summary_vec (higher-level semantic
+                # signal) then claims_vec, then whatever is first.
+                vec = (
+                    vec.get("summary_vec")
+                    or vec.get("claims_vec")
+                    or next(iter(vec.values()))
+                )
             if vec is None:
                 continue
             reflections.append({
@@ -150,6 +185,44 @@ def concept_tokens(concepts_field) -> list[str]:
         parts = [p.strip() for p in concepts_field.split(",") if p.strip()]
         out.extend(normalize_concept(p) for p in parts)
     return [c for c in out if c and len(c) > 1]
+
+
+# ------------------------------------------------- noise detection ----------
+
+def is_noise_cluster(c: dict) -> bool:
+    """
+    Returns True if the cluster looks like a TOC / index / bibliography artifact.
+    Uses two signals that are already present in the summarize_cluster() output:
+
+    1. Concept poverty: zero top_concepts, or all top concepts are in the noise
+       vocabulary (bibliography, index, footnote, etc.).
+    2. Summary noise: majority of exemplar summaries contain known noise phrases
+       ("table of contents", "bibliographic", "provides no substantive text", etc.).
+
+    Either signal alone is enough to flag the cluster.
+    """
+    top_concepts = [tok for tok, _ in c.get("top_concepts", [])]
+
+    # Signal 1: concept poverty
+    if not top_concepts:
+        return True
+    if all(tok in _NOISE_CONCEPT_VOCAB for tok in top_concepts):
+        return True
+
+    # Signal 2: majority of exemplar summaries match noise patterns
+    summaries = [
+        (refl.get("summary") or "").lower()
+        for refl, _ in c.get("exemplars", [])
+    ]
+    if summaries:
+        noise_hits = sum(
+            1 for s in summaries
+            if any(pat in s for pat in _NOISE_SUMMARY_PATTERNS)
+        )
+        if noise_hits / len(summaries) >= 0.5:
+            return True
+
+    return False
 
 
 # ----------------------------------------------------------- pass 1 ---------
@@ -328,6 +401,30 @@ def render_report(
     provincial.sort(key=lambda c: -c["size"])
 
     def write_cluster(c: dict, marker: str) -> None:
+        # --- noise stub: TOC / index / bibliography clusters ---
+        if is_noise_cluster(c):
+            lines.append(
+                f"### {marker} Cluster {c['id']} ⚠ NOISE "
+                f"— {c['size']} reflections, {c['n_sources']} sources "
+                f"— editorial/structural content, skipped"
+            )
+            lines.append("")
+            return
+
+        # --- micro-provincial stub: tiny single-tradition clusters ---
+        is_provincial = c["n_sources"] < canonical_threshold
+        if is_provincial and c["size"] < PROVINCIAL_MICRO_THRESHOLD:
+            top = ", ".join(tok for tok, _ in c["top_concepts"][:4])
+            top_src = c["top_sources"][0][0] if c["top_sources"] else "unknown"
+            lines.append(
+                f"### {marker} Cluster {c['id']} — "
+                f"{c['size']} reflections, {c['n_sources']} sources"
+            )
+            lines.append(f"*Dominant source: {top_src} · Concepts: {top}*")
+            lines.append("")
+            return
+
+        # --- full treatment ---
         lines.append(
             f"### {marker} Cluster {c['id']} — "
             f"{c['size']} reflections, {c['n_sources']} sources"
@@ -347,7 +444,9 @@ def render_report(
         lines.append("")
         lines.append("**Exemplar reflections (closest to centroid):**")
         lines.append("")
-        for refl, score in c["exemplars"]:
+        # provincial clusters get fewer exemplars than canonical
+        n_exemplars = EXEMPLARS_PER_CLUSTER if not is_provincial else 2
+        for refl, score in c["exemplars"][:n_exemplars]:
             summary = (refl["summary"] or "").strip().replace("\n", " ")
             src = refl["source_file"]
             page = refl["page"]
@@ -403,7 +502,7 @@ def main() -> int:
                          f"with a 64-source corpus try 15-20")
     args = ap.parse_args()
 
-    client = QdrantClient(url=QDRANT_URL)
+    client = QdrantClient(url=QDRANT_URL, timeout=QDRANT_TIMEOUT)
 
     reflections = load_all_reflections(client, args.collection, args.sample)
     if not reflections:
