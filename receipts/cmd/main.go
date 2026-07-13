@@ -35,7 +35,6 @@ Environment (.env or shell):
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -491,8 +490,9 @@ type deepSeekMessage struct {
 }
 
 type deepSeekRequest struct {
-	Model    string            `json:"model"`
-	Messages []deepSeekMessage `json:"messages"`
+	Model     string            `json:"model"`
+	Messages  []deepSeekMessage `json:"messages"`
+	MaxTokens int               `json:"max_tokens,omitempty"`
 }
 
 type deepSeekResponse struct {
@@ -561,11 +561,9 @@ func synthesize(
 	model := resolveSynthesisModel(cfg.deepseekURL, cfg.deepseekModel)
 
 	body, _ := json.Marshal(deepSeekRequest{
-		Model: model,
-		Messages: []deepSeekMessage{
-			{Role: "system", Content: synthesisSystemPrompt},
-			{Role: "user", Content: sb.String()},
-		},
+		Model:     model,
+		Messages:  []deepSeekMessage{{Role: "system", Content: synthesisSystemPrompt}, {Role: "user", Content: sb.String()}},
+		MaxTokens: 12000,
 	})
 
 	req, err := http.NewRequestWithContext(ctx, "POST", cfg.deepseekURL, bytes.NewReader(body))
@@ -926,16 +924,6 @@ func stringSliceVal(pl map[string]*qdrant.Value, key string) []string {
 	return out
 }
 
-// confirm prompts the user before doing a long R1 run
-func confirm(prompt string) bool {
-	fmt.Printf("%s [y/N] ", prompt)
-	scanner := bufio.NewScanner(os.Stdin)
-	if scanner.Scan() {
-		return strings.ToLower(strings.TrimSpace(scanner.Text())) == "y"
-	}
-	return false
-}
-
 // ── main ──────────────────────────────────────────────────────────────────────
 
 func main() {
@@ -1041,14 +1029,7 @@ func main() {
 		fmt.Println("ℹ️  No Hardware Glitch receipts yet (misfit_crew still running)")
 	}
 
-	// confirm before R1 run
 	model := cfg.deepseekModel
-	if model == "deepseek-reasoner" {
-		if !confirm(fmt.Sprintf("🧠 Run R1 synthesis? (can take 3-5 min with %s)", model)) {
-			fmt.Println("Aborted.")
-			os.Exit(0)
-		}
-	}
 
 	// synthesize
 	fmt.Printf("🧠 Synthesizing with %s...\n", model)

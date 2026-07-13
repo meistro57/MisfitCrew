@@ -38,3 +38,9 @@ misfit_ledger.jsonl
 
 # Windows alternate stream artifacts
 *:Zone.Identifier
+
+# reports etc
+reviews/
+ALL_REPORTS/*
+receipts/
+ROOTreviews/

@@ -51,12 +51,14 @@ var version = "dev"
 // ── config ────────────────────────────────────────────────────────────────────
 
 type config struct {
-	qdrantHost          string
-	qdrantPort          int
-	findingsCollection  string
-	reflectCollection   string
-	watchSecs           int
-	dryRun              bool
+	qdrantHost         string
+	qdrantPort         int
+	findingsCollection string
+	reflectCollection  string
+	watchSecs          int
+	dryRun             bool
+	reflag             bool // backfill loop_* flags on unflagged meta_reflections
+	reflagBatch        int  // set_payload batch size for reflag mode
 }
 
 func loadConfig() config {
@@ -73,6 +75,8 @@ func loadConfig() config {
 	flag.StringVar(&cfg.reflectCollection, "reflections", cfg.reflectCollection, "meta reflections collection")
 	flag.IntVar(&cfg.watchSecs, "watch", 0, "re-run every N seconds (0 = run once)")
 	flag.BoolVar(&cfg.dryRun, "dry-run", false, "print actions without writing to Qdrant")
+	flag.BoolVar(&cfg.reflag, "reflag", false, "backfill loop_* flags on meta_reflections points that are missing them")
+	flag.IntVar(&cfg.reflagBatch, "reflag-batch", 500, "set_payload batch size for --reflag mode")
 	flag.Parse()
 
 	for _, a := range os.Args[1:] {
@@ -199,6 +203,239 @@ func clusterLabelFromSubject(subject string) string {
 		return strings.TrimSpace(subject[i+1:])
 	}
 	return strings.TrimSpace(subject)
+}
+
+// ── reflag: backfill loop_* flags ────────────────────────────────────────────
+//
+// Scrolls meta_reflections and finds every point that is missing the
+// loop_decision field (i.e. pre-dates the reflect_loop flag persistence work).
+// For each unflagged point it evaluates the existing payload using the same
+// logic as reflect_loop.py and writes loop_interesting, loop_contradiction,
+// loop_decision, and loop_flagged_at via set_payload.
+// No LLM calls — pure local computation on stored payload fields.
+
+type reflagStats struct {
+	total       int
+	alreadyDone int
+	interesting int
+	contradiction int
+	continueScan  int
+	written       int
+	errors        int
+}
+
+// contradictionMarkers mirrors reflect_loop.py detect_possible_contradiction.
+var contradictionMarkers = []string{
+	"not ", "never", "cannot", "opposite", "contradict",
+	"conflict", "but ", "however", "rather than", "instead",
+	"unlike", "deny", "denies", "reject", "rejects", "inconsistent",
+}
+
+func floatVal(pl map[string]*qdrant.Value, key string) float64 {
+	v, ok := pl[key]
+	if !ok || v == nil {
+		return 0
+	}
+	if d, ok := v.Kind.(*qdrant.Value_DoubleValue); ok {
+		return d.DoubleValue
+	}
+	return 0
+}
+
+func listLen(pl map[string]*qdrant.Value, key string) int {
+	v, ok := pl[key]
+	if !ok || v == nil {
+		return 0
+	}
+	lv, ok := v.Kind.(*qdrant.Value_ListValue)
+	if !ok || lv.ListValue == nil {
+		return 0
+	}
+	return len(lv.ListValue.Values)
+}
+
+// listContainsMarker returns true if any string item in the list contains a
+// contradiction marker substring.
+func listContainsMarker(pl map[string]*qdrant.Value, key string) bool {
+	v, ok := pl[key]
+	if !ok || v == nil {
+		return false
+	}
+	lv, ok := v.Kind.(*qdrant.Value_ListValue)
+	if !ok || lv.ListValue == nil {
+		return false
+	}
+	for _, item := range lv.ListValue.Values {
+		s := ""
+		if sv, ok := item.Kind.(*qdrant.Value_StringValue); ok {
+			s = strings.ToLower(sv.StringValue)
+		}
+		for _, m := range contradictionMarkers {
+			if strings.Contains(s, m) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func evaluatePoint(pl map[string]*qdrant.Value) (decision string, interesting bool, contradiction bool) {
+	confidence   := floatVal(pl, "reflection_confidence")
+	claimCount   := listLen(pl, "claims")
+	conceptCount := listLen(pl, "concepts")
+	questionCount := listLen(pl, "questions")
+	echoCount    := listLen(pl, "echoes")
+
+	hasContradiction := listContainsMarker(pl, "claims")
+
+	isInteresting := confidence >= 0.60 ||
+		claimCount >= 3 ||
+		conceptCount >= 4 ||
+		questionCount >= 2 ||
+		echoCount >= 2
+
+	switch {
+	case hasContradiction:
+		return "track_contradiction", false, true
+	case isInteresting:
+		return "store_interesting", true, false
+	default:
+		return "continue_scan", false, false
+	}
+}
+
+func qInt(n int64) *qdrant.Value {
+	return &qdrant.Value{Kind: &qdrant.Value_IntegerValue{IntegerValue: n}}
+}
+
+func reflagReflections(ctx context.Context, conn *grpc.ClientConn, cfg config) error {
+	client := qdrant.NewPointsClient(conn)
+
+	fmt.Printf("\n🏷️  reflag mode — scanning %s for unflagged points\n", cfg.reflectCollection)
+	if cfg.dryRun {
+		fmt.Println("  mode: DRY RUN")
+	}
+
+	var stats reflagStats
+	var offset *qdrant.PointId
+
+	// batch of (pointID, decision, interesting, contradiction) to flush
+	type pendingTag struct {
+		pid          *qdrant.PointId
+		decision     string
+		interesting  bool
+		contradiction bool
+	}
+	var batch []pendingTag
+
+	flushBatch := func() error {
+		if len(batch) == 0 || cfg.dryRun {
+			stats.written += len(batch)
+			batch = batch[:0]
+			return nil
+		}
+		now := time.Now().Unix()
+		// We must call SetPayload once per unique payload combination, OR
+		// call it per-point. Per-point is simplest and still fast in batches.
+		for _, p := range batch {
+			payload := map[string]*qdrant.Value{
+				"loop_interesting":   qBool(p.interesting),
+				"loop_contradiction": qBool(p.contradiction),
+				"loop_decision":      qStr(p.decision),
+				"loop_flagged_at":    qInt(now),
+			}
+			_, err := client.SetPayload(ctx, &qdrant.SetPayloadPoints{
+				CollectionName: cfg.reflectCollection,
+				Payload:        payload,
+				PointsSelector: &qdrant.PointsSelector{
+					PointsSelectorOneOf: &qdrant.PointsSelector_Points{
+						Points: &qdrant.PointsIdsList{Ids: []*qdrant.PointId{p.pid}},
+					},
+				},
+			})
+			if err != nil {
+				stats.errors++
+				fmt.Fprintf(os.Stderr, "  set_payload error: %v\n", err)
+				continue
+			}
+			stats.written++
+		}
+		batch = batch[:0]
+		return nil
+	}
+
+	for {
+		resp, err := client.Scroll(ctx, &qdrant.ScrollPoints{
+			CollectionName: cfg.reflectCollection,
+			Limit:          uint32Ptr(250),
+			Offset:         offset,
+			WithPayload:    &qdrant.WithPayloadSelector{SelectorOptions: &qdrant.WithPayloadSelector_Enable{Enable: true}},
+			WithVectors:    &qdrant.WithVectorsSelector{SelectorOptions: &qdrant.WithVectorsSelector_Enable{Enable: false}},
+		})
+		if err != nil {
+			return fmt.Errorf("scroll: %w", err)
+		}
+
+		for _, pt := range resp.Result {
+			stats.total++
+			pl := pt.Payload
+
+			// skip if already flagged
+			if _, exists := pl["loop_decision"]; exists {
+				stats.alreadyDone++
+				continue
+			}
+
+			decision, interesting, contradiction := evaluatePoint(pl)
+			switch decision {
+			case "store_interesting":
+				stats.interesting++
+			case "track_contradiction":
+				stats.contradiction++
+			default:
+				stats.continueScan++
+			}
+
+			batch = append(batch, pendingTag{
+				pid:          pt.Id,
+				decision:     decision,
+				interesting:  interesting,
+				contradiction: contradiction,
+			})
+
+			if len(batch) >= cfg.reflagBatch {
+				if err := flushBatch(); err != nil {
+					return err
+				}
+				fmt.Printf("  ↳ flagged %d so far (interesting=%d contradiction=%d scan=%d errors=%d)\n",
+					stats.written, stats.interesting, stats.contradiction, stats.continueScan, stats.errors)
+			}
+		}
+
+		if resp.NextPageOffset == nil {
+			break
+		}
+		offset = resp.NextPageOffset
+	}
+
+	// flush remainder
+	if err := flushBatch(); err != nil {
+		return err
+	}
+
+	dryTag := ""
+	if cfg.dryRun {
+		dryTag = " (dry-run)"
+	}
+	fmt.Printf("\n✅ reflag complete%s\n", dryTag)
+	fmt.Printf("  total scanned:    %d\n", stats.total)
+	fmt.Printf("  already flagged:  %d\n", stats.alreadyDone)
+	fmt.Printf("  newly flagged:    %d\n", stats.written)
+	fmt.Printf("    interesting:    %d\n", stats.interesting)
+	fmt.Printf("    contradiction:  %d\n", stats.contradiction)
+	fmt.Printf("    continue_scan:  %d\n", stats.continueScan)
+	fmt.Printf("  errors:           %d\n", stats.errors)
+	return nil
 }
 
 // ── scroll findings ───────────────────────────────────────────────────────────
@@ -492,6 +729,17 @@ func main() {
 	}
 	if cfg.watchSecs > 0 {
 		fmt.Printf("  watch:       every %ds\n", cfg.watchSecs)
+	}
+
+	// --reflag runs once and exits — no watch mode needed
+	if cfg.reflag {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		if err := reflagReflections(ctx, conn, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "reflag error: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	run := func() {
